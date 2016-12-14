@@ -1,0 +1,745 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Builds a Jenkins server on EC2",
+  "Parameters": {
+    "EnvironmentName": {
+      "Description": "An environment name that will be prefixed to resource names",
+      "Type": "String"
+    },
+    "MyVPC": {
+      "Description": "Choose which VPC the Application Load Balancer should be deployed to",
+      "Type": "AWS::EC2::VPC::Id"
+    },
+    "MySubnets": {
+      "Description": "Choose which subnets the Application Load Balancer should be deployed to",
+      "Type": "List<AWS::EC2::Subnet::Id>"
+    },
+    "KeyName": {
+      "Description": "Name of an existing EC2 KeyPair for SSH access to the instances.",
+      "Type": "AWS::EC2::KeyPair::KeyName"
+    },
+    "S3ConfigBucket": {
+      "Description": "Name of the bucket where Jenkins config will be stored.",
+      "Type": "String",
+      "Default": "deis-nejm"
+    },
+    "InstanceType": {
+      "Description": "The EC2 instance type",
+      "Type": "String",
+      "Default": "t2.micro",
+      "AllowedValues": [
+        "t2.micro",
+        "t2.small",
+        "t2.medium",
+        "m3.medium",
+        "m3.large",
+        "m3.xlarge",
+        "m3.2xlarge",
+        "c3.large",
+        "c3.xlarge",
+        "c3.2xlarge",
+        "c3.4xlarge",
+        "c3.8xlarge",
+        "c4.large",
+        "c4.xlarge",
+        "c4.2xlarge",
+        "c4.4xlarge",
+        "c4.8xlarge",
+        "r3.large",
+        "r3.xlarge",
+        "r3.2xlarge",
+        "r3.4xlarge",
+        "r3.8xlarge",
+        "i2.xlarge",
+        "i2.2xlarge",
+        "i2.4xlarge",
+        "i2.8xlarge",
+        "d2.xlarge",
+        "d2.2xlarge",
+        "d2.4xlarge",
+        "d2.8xlarge",
+        "hi1.4xlarge",
+        "hs1.8xlarge",
+        "cr1.8xlarge",
+        "cc2.8xlarge"
+      ],
+      "ConstraintDescription": "Must be a valid EC2 instance type."
+    }
+  },
+  "Mappings": {
+    "RegionMap": {
+      "us-east-1": {
+        "AMI": "ami-40d28157"
+      }
+    }
+  },
+  "Resources": {
+    "JenkinsRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Sid": "",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ec2.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Path": "/"
+      }
+    },
+    "JenkinsRolePolicies": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "JenkinsRole",
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "*"
+              ],
+              "Effect": "Allow",
+              "Resource": "*"
+            }
+          ]
+        },
+        "Roles": [
+          {
+            "Ref": "JenkinsRole"
+          }
+        ]
+      }
+    },
+    "JenkinsInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [
+          {
+            "Ref": "JenkinsRole"
+          }
+        ]
+      }
+    },
+    "JenkinsSG": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Enable HTTP access on port 80",
+        "VpcId": {
+          "Ref": "MyVPC"
+        },
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": "-1",
+            "ToPort": "-1",
+            "SourceSecurityGroupId": {
+              "Fn::GetAtt":[
+                 "JenkinsELBSG",
+                 "GroupId"
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Ref": "EnvironmentName"
+                  },
+                  "-jenkins-sg"
+                ]
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "JenkinsHostWaitHandle": {
+      "Type": "AWS::CloudFormation::WaitConditionHandle"
+    },
+    "JenkinsHostWaitCondition": {
+      "Type": "AWS::CloudFormation::WaitCondition",
+      "DependsOn": "JenkinsLaunchConfig",
+      "Properties": {
+        "Handle": {
+          "Ref": "JenkinsHostWaitHandle"
+        },
+        "Timeout": "600"
+      }
+    },
+    "JenkinsASG": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "LaunchConfigurationName": {
+          "Ref": "JenkinsLaunchConfig"
+        },
+        "MinSize": "1",
+        "MaxSize": "1",
+        "DesiredCapacity": "1",
+        "LoadBalancerNames": [
+          {
+            "Ref": "JenkinsLoadBalancer"
+          }
+        ],
+        "VPCZoneIdentifier": {
+          "Ref": "MySubnets"
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Ref": "EnvironmentName"
+                  },
+                  "-jenkins-autoscaling-group"
+                ]
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "JenkinsLaunchConfig": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Metadata": {
+        "AWS::CloudFormation::Init": {
+          "users": {
+            "jenkins": {
+              "groups": [
+                "jenkins"
+              ],
+              "uid": "50",
+              "homeDir": "/var/lib/"
+            }
+          },
+          "config": {
+            "files": {
+              "/tmp/WEB-INF/init.groovy": {
+                "content": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "import hudson.model.*;\n",
+                      "import jenkins.model.*;\n",
+                      "println \"--> setting agent port for jnlp\"\n",
+                      "Jenkins.instance.setSlaveAgentPort(50000)\n"
+                    ]
+                  ]
+                },
+                "mode": "000644",
+                "owner": "root",
+                "group": "root"
+              },
+              "/var/jenkins_home/start_jenkins.sh": {
+                "content": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "#!/bin/bash -l\n",
+                      "\n",
+                      "set -x\n",
+                      "\n",
+                      "gpg --keyserver hkp://keys.gnupg.net --recv-keys 409B6B1796C275462A1703113804BB82D39DC0E3\n",
+                      "curl -sSL https://get.rvm.io | bash\n",
+                      "source /var/lib/jenkins/.rvm/scripts/rvm\n",
+                      "\n",
+                      "rvm install 2.2.1\n",
+                      "rvm use --default ruby-v2.2.1\n",
+                      "gem install bundler\n",
+                      "\n",
+                      "apt-get purge firefox\n",
+                      "wget sourceforge.net/projects/ubuntuzilla/files/mozilla/apt/pool/main/f/firefox-mozilla-build/firefox-mozilla-build_46.0-0ubuntu1_amd64.deb\n",
+                      "dpkg -i firefox-mozilla-build_46.0-0ubuntu1_amd64.deb\n",
+                      "\n",
+                      "chown jenkins:jenkins /var/lib/jenkins -R\n",
+                      "LATEST_BACKUP_FILENAME=$(aws s3 ls --recursive s3://",{ "Ref" : "S3ConfigBucket" },"/jenkins-backups/ | tail -1 | awk '{print $4}')\n",
+                      "aws s3 cp s3://",{ "Ref" : "S3ConfigBucket" },"/$LATEST_BACKUP_FILENAME  - | tar -C / -zxf -\n",
+                      "\n",
+                      "java -jar -Djenkins.install.runSetupWizard=false /usr/share/jenkins/jenkins.war"
+                    ]
+                  ]
+                },
+                "mode": "000644",
+                "owner": "jenkins",
+                "group": "jenkins"
+              },
+              "/usr/bin/local/batch-install-jenkins-plugins.sh": {
+                "content": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "#!/bin/bash\n",
+                      "\n",
+                      "readonly PROGNAME=$(basename $0)\n",
+                      "readonly PROGDIR=$(readlink -m $(dirname $0))\n",
+                      "readonly ARGS=\"$@\"\n",
+                      "\n",
+                      "#\n",
+                      "# Get up to date JSON file of stable plugins\n",
+                      "#\n",
+                      "get_update_center() {\n",
+                      "\n",
+                      "  echo \"Fetching JSON from update center\"\n",
+                      "\n",
+                      "# fetch up to date update center\n",
+                      "  $CURL_CMD http://updates.jenkins-ci.org/stable/update-center.json -o $PLUGIN_TEMPDIR/update-center.json\n",
+                      "\n",
+                      "# cleanup json\n",
+                      "  sed -i 's|updateCenter.post(||g' $PLUGIN_TEMPDIR/update-center.json\n",
+                      "  sed -i 's|);||g' $PLUGIN_TEMPDIR/update-center.json\n",
+                      "}\n",
+                      "\n",
+                      "#\n",
+                      "# Fetch and install plugin\n",
+                      "#\n",
+                      "fetch_plugin()\n",
+                      "{\n",
+                      "  local DEP_LOOP\n",
+                      "  local DEPENDENCIES\n",
+                      "  local DEPENDENCY\n",
+                      "  local URL\n",
+                      "  local VERSION\n",
+                      "  local SFILENAME\n",
+                      "  local FFILENAME\n",
+                      "  local PPLUGIN\n",
+                      "  local OPTIONALP\n",
+                      "  local FPLUGIN=$1\n",
+                      "\n",
+                      "  if [ ! -z \"$EXCLUDED_PLUGINS\" ]; then\n",
+                      "  for PPLUGIN in $EXCLUDED_PLUGINS\n",
+                      "  do\n",
+                      "    if [ \"$FPLUGIN\" = \"$PPLUGIN\" ]; then\n",
+                      "    echo \"$FPLUGIN is already provided, exiting\"\n",
+                      "    return\n",
+                      "    fi\n",
+                      "  done\n",
+                      "  fi\n",
+                      "\n",
+                      "  URL=$(cat $PLUGIN_TEMPDIR/update-center.json | python -c \"import sys, json; print json.load(sys.stdin)[\\\"plugins\\\"][\\\"$FPLUGIN\\\"][\\\"url\\\"]\")\n",
+                      "  VERSION=$(cat $PLUGIN_TEMPDIR/update-center.json | python -c \"import sys, json; print json.load(sys.stdin)[\\\"plugins\\\"][\\\"$FPLUGIN\\\"][\\\"version\\\"]\")\n",
+                      "\n",
+                      "  SFILENAME=$(basename $URL | sed -e \"s|.hpi|.jpi|g\")\n",
+                      "  FFILENAME=$(basename $URL | sed -e \"s|.hpi|-$VERSION.jpi|g\")\n",
+                      "\n",
+                      "  INCLUDEDPLUGINS=\"$INCLUDEDPLUGINS$FPLUGIN:$VERSION\n\"\n",
+                      "\n",
+                      "  if [ ! -f $PLUGIN_TEMPDIR/$FFILENAME ]; then\n",
+                      "  echo \"Downloading $FPLUGIN\"\n",
+                      "  $CURL_CMD $URL -o $PLUGIN_TEMPDIR/$FFILENAME\n",
+                      "  fi\n",
+                      "\n",
+                      "  cp $PLUGIN_TEMPDIR/$FFILENAME $PLUGINS_DIR/$SFILENAME\n",
+                      "\n",
+                      "  DEPENDENCIES=$(cat $PLUGIN_TEMPDIR/update-center.json | python -c \"import sys, json; print json.load(sys.stdin)[\\\"plugins\\\"][\\\"$FPLUGIN\\\"][\\\"dependencies\\\"]\")\n",
+                      "\n",
+                      "  if [ \"$DEPENDENCIES\" != \"[]\" ]; then\n",
+                      "\n",
+                      "  for DEP_LOOP in 0 1 2 3 4 5 6 7 8 9 10; do\n",
+                      "    DEPENDENCY=$(cat $PLUGIN_TEMPDIR/update-center.json | python -c \"import sys, json; print json.load(sys.stdin)[\\\"plugins\\\"][\\\"$FPLUGIN\\\"][\\\"dependencies\\\"][$DEP_LOOP][\\\"name\\\"]\" 2>/dev/null || true)\n",
+                      "\n",
+                      "    # No more dependency, exit loop\n",
+                      "    if [ \"$DEPENDENCY\" = \"\" ]; then\n",
+                      "    break;\n",
+                      "    fi\n",
+                      "\n",
+                      "    OPTIONALP=$(cat $PLUGIN_TEMPDIR/update-center.json | python -c \"import sys, json; print json.load(sys.stdin)[\\\"plugins\\\"][\\\"$FPLUGIN\\\"][\\\"dependencies\\\"][$DEP_LOOP][\\\"optional\\\"]\" 2>/dev/null|| true)\n",
+                      "\n",
+                      "    # Don't fetch optional dependencies\n",
+                      "    if [ \"$OPTIONALP\" = \"True\" ]; then\n",
+                      "    echo \"$DEPENDENCY plugin is optional, it won't be included\"\n",
+                      "    continue;\n",
+                      "    fi\n",
+                      "\n",
+                      "    fetch_plugin $DEPENDENCY\n",
+                      "  done\n",
+                      "  fi\n",
+                      "}\n",
+                      "\n",
+                      "usage() {\n",
+                      "  cat <<- EOF\n",
+                      "  usage: $PROGNAME options\n",
+                      "\n",
+                      "  Install or update Jenkins Plugins.\n",
+                      "\n",
+                      "  OPTIONS:\n",
+                      "     -p --plugins  file containing plugins list\n",
+                      "     -x --xplugins   file containing excluded plugins list\n",
+                      "     -d --plugindir  directory where to deploy plugins (.jpi)\n",
+                      "\n",
+                      "  Examples:\n",
+                      "\n",
+                      "     Run:\n",
+                      "     $PROGNAME --plugins okplugins --excludedplugins nokplugins --plugindir /var/lib/myjenkins/plugins\n",
+                      "EOF\n",
+                      "\n",
+                      "  exit 1\n",
+                      "}\n",
+                      "\n",
+                      "#\n",
+                      "# Parse command line\n",
+                      "#\n",
+                      "cmdline() {\n",
+                      "  # got this idea from here:\n",
+                      "  # http://kirk.webfinish.com/2009/10/bash-shell-script-to-use-getopts-with-gnu-style-long-positional-parameters/\n",
+                      "  local arg=\n",
+                      "  for arg\n",
+                      "  do\n",
+                      "    local delim=\"\"\n",
+                      "    case \"$arg\" in\n",
+                      "      #translate --gnu-long-options to -g (short options)\n",
+                      "      --plugins)     args=\"${args}-p \";;\n",
+                      "      --xplugins)    args=\"${args}-e \";;\n",
+                      "      --plugindir)     args=\"${args}-d \";;\n",
+                      "      --help)      args=\"${args}-h \";;\n",
+                      "      --verbose)     args=\"${args}-v \";;\n",
+                      "      --debug)       args=\"${args}-x \";;\n",
+                      "      #pass through anything else\n",
+                      "      *) [[ \"${arg:0:1}\" == \"-\" ]] || delim=\"\\\"\"\n",
+                      "        args=\"${args}${delim}${arg}${delim} \";;\n",
+                      "    esac\n",
+                      "  done\n",
+                      "\n",
+                      "  #Reset the positional parameters to the short options\n",
+                      "  eval set -- $args\n",
+                      "\n",
+                      "  while getopts \"hvxp:e:d:\" OPTION\n",
+                      "  do\n",
+                      "     case $OPTION in\n",
+                      "     v)\n",
+                      "       readonly VERBOSE=1\n",
+                      "       ;;\n",
+                      "     x)\n",
+                      "       readonly DEBUG='-x'\n",
+                      "       set -x\n",
+                      "       ;;\n",
+                      "     h)\n",
+                      "       usage\n",
+                      "       exit 0\n",
+                      "       ;;\n",
+                      "     p)\n",
+                      "       readonly PLUGINS_FILE=$OPTARG\n",
+                      "       ;;\n",
+                      "     e)\n",
+                      "       readonly EXCLUDED_PLUGINS_FILE=$OPTARG\n",
+                      "       ;;\n",
+                      "     d)\n",
+                      "       readonly PLUGINS_DIR=$OPTARG\n",
+                      "       ;;\n",
+                      "    esac\n",
+                      "  done\n",
+                      "\n",
+                      "  if [ -z \"$PLUGINS_FILE\" ]; then\n",
+                      "    echo \"You must provide plugin file\"\n",
+                      "    usage\n",
+                      "  fi\n",
+                      "\n",
+                      "  if [ -z \"$PLUGINS_DIR\" ]; then\n",
+                      "    echo \"You must provide plugin directory\"\n",
+                      "    usage\n",
+                      "  fi\n",
+                      "\n",
+                      "  readonly PLUGINS=$(cat $PLUGINS_FILE)\n",
+                      "\n",
+                      "  if [ ! -z \"$EXCLUDED_PLUGINS_FILE\" ]; then\n",
+                      "    readonly EXCLUDED_PLUGINS=$(cat $EXCLUDED_PLUGINS_FILE)\n",
+                      "  fi\n",
+                      "\n",
+                      "  if [ \"$VERBOSE\" = \"1\" ]; then\n",
+                      "  CURL_CMD=\"curl -L\"\n",
+                      "  else\n",
+                      "  CURL_CMD=\"curl -L --silent\"\n",
+                      "  fi\n",
+                      "\n",
+                      "  if [ \"$DEBUG\" = \"-x\" ]; then\n",
+                      "  CURL_CMD=\"$CURL_CMD -v\"\n",
+                      "  fi\n",
+                      "}\n",
+                      "\n",
+                      "\n",
+                      "main() {\n",
+                      "\n",
+                      "  cmdline $ARGS\n",
+                      "\n",
+                      "  readonly PLUGIN_TEMPDIR=$(mktemp -d /tmp/batchjpi.XXXXXXX)\n",
+                      "\n",
+                      "  get_update_center\n",
+                      "\n",
+                      "  for PLUGIN in $PLUGINS\n",
+                      "  do\n",
+                      "  echo \"Fetching plugin $PLUGIN and dependencies\"\n",
+                      "  fetch_plugin $PLUGIN\n",
+                      "  done\n",
+                      "\n",
+                      "  rm -rf $PLUGIN_TEMPDIR\n",
+                      "}\n",
+                      "\n",
+                      "main\n"
+                    ]
+                  ]
+                },
+                "mode": "000644",
+                "owner": "jenkins",
+                "group": "jenkins"
+              },
+              "/usr/bin/local/plugins.txt": {
+                "content": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "build-pipeline-plugin\n",
+                      "build-timeout\n",
+                      "credentials-binding\n",
+                      "cucumber-reports\n",
+                      "cucumber-slack-notifier\n",
+                      "git\n",
+                      "email-ext\n",
+                      "htmlpublisher\n",
+                      "jenkins-cloudformation-plugin\n",
+                      "job-dsl\n",
+                      "nodejs\n",
+                      "pipeline-build-step\n",
+                      "pipeline-input-step\n",
+                      "pipeline-rest-api\n",
+                      "pipeline-stage-step\n",
+                      "pipeline-stage-view\n",
+                      "ssh-agent\n",
+                      "ssh-slaves\n",
+                      "timestamper\n",
+                      "ws-cleanup\n",
+                      "slack\n",
+                      "postbuild-task\n",
+                      "cucumber-reports\n",
+                      "disk-usage\n",
+                      "rvm\n",
+                      "rake\n",
+                      "xvfb\n",
+                      "job-import-plugin\n",
+                      "zephyr-for-jira-test-management\n",
+                      "subversion\n",
+                      "svn-tag\n",
+                      "aws-codepipeline\n"
+                    ]
+                  ]
+                },
+                "mode": "000644",
+                "owner": "jenkins",
+                "group": "jenkins"
+              }
+            }
+          }
+        }
+      },
+      "Properties": {
+        "KeyName": {
+          "Ref": "KeyName"
+        },
+        "ImageId": {
+          "Fn::FindInMap": [
+            "RegionMap",
+            {
+              "Ref": "AWS::Region"
+            },
+            "AMI"
+          ]
+        },
+        "AssociatePublicIpAddress": false,
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash -ex\n",
+                "yum update -y aws-cfn-bootstrap\n",
+                "# Update the AWS CLI to the latest version\n",
+                "yum install -y aws-cli\n",
+                "function error_exit\n",
+                "{\n",
+                "  /opt/aws/bin/cfn-signal -e 1 -r \"$1\" '",
+                {
+                  "Ref": "JenkinsHostWaitHandle"
+                },
+                "'\n",
+                "  exit 1\n",
+                "}\n",
+                "/opt/aws/bin/cfn-init -v -s ",
+                {
+                  "Ref": "AWS::StackName"
+                },
+                " -r JenkinsServer --region ",
+                {
+                  "Ref": "AWS::Region"
+                },
+                "\n",
+                "/bin/bash -c 'echo \"jenkins ALL= NOPASSWD: ALL\" | (EDITOR=\"tee -a\" visudo)'\n",
+                "apt-get update\n",
+                "apt-get install -y wget git curl\n",
+                "apt-get install -y --no-install-recommends openjdk-7-jd\n",
+                "apt-get install -y maven ant make\n",
+                "apt-get install -y python-pip && pip install awscli\n",
+                "apt-get install -y mysql-client\n",
+                "apt-get update && apt-get install -y firefox\n",
+                "apt-get install -y xvfb\n",
+                "apt-get install -y groff\n",
+                "apt-get update && apt-get install -y build-essential zlib1g-dev libssl-dev libreadline6-dev libyaml-dev\n",
+                "curl -sL https://deb.nodesource.com/setup_6.x | bash -",
+                "apt-get install -y nodejs\n",
+                "npm install newman --global\n",
+                "echo \"1.554.3\" > .lts-version-number\n",
+                "wget -q -O - http://pkg.jenkins-ci.org/debian-stable/jenkins-ci.org.key | apt-key add -\n",
+                "echo deb http://pkg.jenkins-ci.org/debian-stable binary/ >> /etc/apt/sources.list\n",
+                "apt-get install -y zip && cd /tmp && zip -g /usr/share/jenkins/jenkins.war WEB-INF/init.groovy\n",
+                "mkdir -p /var/jenkins_home/plugins\n",
+                "chown -R jenkins:jenkins /var/jenkins_home\n",
+                "/bin/bash -C /usr/bin/local/batch-install-jenkins-plugins.sh --plugins /usr/bin/local/plugins.txt --plugindir /var/jenkins_home/plugins",
+                "locale-gen en_US.utf8\n",
+                "chown -R jenkins:jenkins /var/jenkins_home\n",
+                "chmod +x /var/jenkins_home/start_jenkins.sh\n",
+                "export JENKINS_HOME=/var/jenkins_home",
+                "echo \"export JENKINS_HOME=/var/jenkins_home\" >> /var/lib/jenkins/.bashrc\n",
+                "echo \"export LANG=en_US.utf8\" >> /var/lib/jenkins/.bashrc\n",
+                "echo \"export LC_ALL=en_US.utf8\" >> /var/lib/jenkins/.bashrc\n",
+                "# Install Jenkins\n",
+                "#service jenkins start\n",
+                "#chkconfig jenkins on\n",
+                "## Wait 30 seconds to allow Jenkins to startup\n",
+                "#echo \"Waiting 30 seconds for Jenkins to start.....\"\n",
+                "#sleep 30\n",
+                "#usermod -a -G docker jenkins\n",
+                "## Install the required plugins\n",
+                "#cd /var/lib/jenkins/plugins\n",
+                "#curl -O -L https://updates.jenkins-ci.org/latest/aws-codepipeline.hpi\n",
+                "#chown jenkins:jenkins *.hpi\n",
+                "#mv /tmp/hudson.tasks.Maven.xml /var/lib/jenkins/\n",
+                "#mv /tmp/jenkins.mvn.GlobalMavenConfig.xml /var/lib/jenkins/\n",
+                "#chown jenkins:jenkins /var/lib/jenkins/*.xml\n",
+                "## Restarting Jenkins\n",
+                "#service jenkins restart\n",
+                "#echo \"Waiting 30 seconds for Jenkins to start.....\"\n",
+                "#sleep 30\n",
+                "# Set up port forwarding\n",
+                "iptables -A PREROUTING -t nat -i eth0 -p tcp --dport 80 -j REDIRECT --to-port 8080\n",
+                "iptables-save > /etc/sysconfig/iptables\n",
+                "bash /var/jenkins_home/start_jenkins.sh &",
+                "# If all went well, signal success\n",
+                "/opt/aws/bin/cfn-signal -e $? -r 'Instance configuration complete' '",
+                {
+                  "Ref": "JenkinsHostWaitHandle"
+                },
+                "'\n",
+                "\n"
+              ]
+            ]
+          }
+        },
+        "InstanceType": {
+          "Ref": "InstanceType"
+        },
+        "SecurityGroups": [
+          {
+            "Ref": "JenkinsSG"
+          }
+        ]
+      }
+    },
+    "JenkinsELBSG": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Enable HTTP access on port 80",
+        "VpcId": {
+          "Ref": "MyVPC"
+        },
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": "-1",
+            "ToPort": "-1",
+            "CidrIp": "0.0.0.0/0"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Ref": "EnvironmentName"
+                  },
+                  "-jenkins-elb-sg"
+                ]
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "JenkinsLoadBalancer": {
+      "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+      "DependsOn": [
+        "JenkinsELBSG",
+        "JenkinsRole"
+      ],
+      "Properties": {
+        "Subnets": {
+          "Ref": "MySubnets"
+        },
+        "Listeners":[
+           {
+              "LoadBalancerPort":"80",
+              "InstancePort":"80",
+              "Protocol":"HTTP"
+           }
+        ],
+        "HealthCheck":{
+           "Target":"HTTP:80/",
+           "HealthyThreshold":"2",
+           "UnhealthyThreshold":"10",
+           "Interval":"30",
+           "Timeout":"5"
+        },
+        "SecurityGroups": [
+          {
+            "Ref": "JenkinsELBSG"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Ref": "EnvironmentName"
+                  },
+                  "-jenkins-elb"
+                ]
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "JenkinsLoadBalancer": {
+      "Description": "A reference to the Jenkins load balancer",
+      "Value": {
+        "Ref": "JenkinsLoadBalancer"
+      }
+    }
+  }
+}
