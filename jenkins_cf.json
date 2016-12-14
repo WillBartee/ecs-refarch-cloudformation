@@ -10,8 +10,12 @@
       "Description": "Choose which VPC the Application Load Balancer should be deployed to",
       "Type": "AWS::EC2::VPC::Id"
     },
-    "MySubnets": {
-      "Description": "Choose which subnets the Application Load Balancer should be deployed to",
+    "PublicSubnets": {
+      "Description": "Choose which public subnets the should be referenced in",
+      "Type": "List<AWS::EC2::Subnet::Id>"
+    },
+    "PrivateSubnets": {
+      "Description": "Choose which private subnets the Autoscaling group should create the instances in",
       "Type": "List<AWS::EC2::Subnet::Id>"
     },
     "KeyName": {
@@ -191,7 +195,7 @@
           }
         ],
         "VPCZoneIdentifier": {
-          "Ref": "MySubnets"
+          "Ref": "PrivateSubnets"
         },
         "Tags": [
           {
@@ -694,7 +698,7 @@
       ],
       "Properties": {
         "Subnets": {
-          "Ref": "MySubnets"
+          "Ref": "PublicSubnets"
         },
         "Listeners":[
            {
