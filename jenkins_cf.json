@@ -140,9 +140,9 @@
           {
             "IpProtocol": "-1",
             "SourceSecurityGroupId": {
-              "Fn::GetAtt":[
-                 "JenkinsELBSG",
-                 "GroupId"
+              "Fn::GetAtt": [
+                "JenkinsELBSG",
+                "GroupId"
               ]
             }
           }
@@ -205,11 +205,11 @@
                   {
                     "Ref": "EnvironmentName"
                   },
-                  "-jenkins-autoscaling-group"
+                  "-jenkins"
                 ]
               ]
             },
-           "PropagateAtLaunch" : "true"
+            "PropagateAtLaunch": "true"
           }
         ]
       }
@@ -267,8 +267,16 @@
                       "dpkg -i firefox-mozilla-build_46.0-0ubuntu1_amd64.deb\n",
                       "\n",
                       "chown jenkins:jenkins /var/lib/jenkins -R\n",
-                      "LATEST_BACKUP_FILENAME=$(aws s3 ls --recursive s3://",{ "Ref" : "S3ConfigBucket" },"/jenkins-backups/ | tail -1 | awk '{print $4}')\n",
-                      "aws s3 cp s3://",{ "Ref" : "S3ConfigBucket" },"/$LATEST_BACKUP_FILENAME  - | tar -C / -zxf -\n",
+                      "LATEST_BACKUP_FILENAME=$(aws s3 ls --recursive s3://",
+                      {
+                        "Ref": "S3ConfigBucket"
+                      },
+                      "/jenkins-backups/ | tail -1 | awk '{print $4}')\n",
+                      "aws s3 cp s3://",
+                      {
+                        "Ref": "S3ConfigBucket"
+                      },
+                      "/$LATEST_BACKUP_FILENAME  - | tar -C / -zxf -\n",
                       "\n",
                       "java -jar -Djenkins.install.runSetupWizard=false /usr/share/jenkins/jenkins.war"
                     ]
@@ -697,19 +705,19 @@
         "Subnets": {
           "Ref": "PublicSubnets"
         },
-        "Listeners":[
-           {
-              "LoadBalancerPort":"80",
-              "InstancePort":"80",
-              "Protocol":"HTTP"
-           }
+        "Listeners": [
+          {
+            "LoadBalancerPort": "80",
+            "InstancePort": "80",
+            "Protocol": "HTTP"
+          }
         ],
-        "HealthCheck":{
-           "Target":"HTTP:80/",
-           "HealthyThreshold":"2",
-           "UnhealthyThreshold":"10",
-           "Interval":"30",
-           "Timeout":"5"
+        "HealthCheck": {
+          "Target": "TCP:80",
+          "HealthyThreshold": "2",
+          "UnhealthyThreshold": "10",
+          "Interval": "30",
+          "Timeout": "5"
         },
         "SecurityGroups": [
           {
